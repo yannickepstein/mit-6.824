@@ -1,10 +1,12 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"os"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,18 +26,35 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+//
+type Mapper func(string, string) []KeyValue
+type Reducer func(string, []string) string
 
-	// Your worker implementation here.
+func NewWorker(mapf Mapper, reducef Reducer) {
+	sockname := workerSock()
+	err := reportIdle(sockname)
+	if err != nil {
+		// if the coordinator does not know about us, it does not make sense to wait for work
+		fmt.Fprint(os.Stderr, err)
+		return
+	}
+}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
+func reportIdle(sockname string) error {
+	args := ReportIdleArgs{}
+	args.Sockname = sockname
+	reply := ReportIdleReply{}
+	ok := call("Coordinator.IdleWorker", &args, &reply)
+	if !ok {
+		return ResponseErr{
+			Message: "coordinator failed to react on worker reporting idle status",
+		}
+	}
+	fmt.Println("worker has successfully reported to coordinator")
+	return nil
 }
 
 //
