@@ -117,64 +117,45 @@ func (c *Coordinator) Done() bool {
 func (c *Coordinator) registerWorker(w coordinatedWorker) {
 	log.Printf("worker %v has registered\n", w.WorkerId)
 	c.workers.Add(1)
-	healthCheckFailure := make(chan bool, 1)
 	go func() {
-		log.Printf("starting health checker for worker %v\n", w.WorkerId)
+		log.Printf("worker %v starts to consume tasks from the scheduler\n", w.WorkerId)
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
+		defer c.workers.Done()
+
+		execMapf := func(task mapTask) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, err := w.mapf(ctx, task)
+			if err != nil {
+				c.failedMapTask <- task
+				return
+			}
+			c.mapResults <- result
+		}
+
+		execReducef := func(task reduceTask) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, err := w.reducef(ctx, task)
+			if err != nil {
+				c.failedReduceTask <- task
+				return
+			}
+			c.reduceResults <- result
+		}
+
 		for {
 			select {
-			case <-c.shutdownWorkers:
-				log.Printf("worker %v has been shut down, stopping health check\n", w.WorkerId)
-				return
 			case <-t.C:
 				if err := pingWorker(w); err != nil {
 					fmt.Fprintf(os.Stderr, "health check for worker %s failed", w.WorkerId)
-					healthCheckFailure <- true
 					return
 				}
-			}
-		}
-	}()
-
-	go func() {
-		log.Printf("worker %v starts to consume tasks from the scheduler\n", w.WorkerId)
-		defer c.workers.Done()
-		var mapTasks []mapTask
-		var reduceTasks []reduceTask
-		for {
-			select {
 			case task := <-c.scheduledMapTask:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				result, err := w.mapf(ctx, task)
-				if err != nil {
-					c.failedMapTask <- task
-					break
-				}
-				mapTasks = append(mapTasks, task)
-				c.mapResults <- result
+				execMapf(task)
 			case task := <-c.scheduledReduceTask:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				result, err := w.reducef(ctx, task)
-				if err != nil {
-					c.failedReduceTask <- task
-					break
-				}
-				reduceTasks = append(reduceTasks, task)
-				c.reduceResults <- result
-			case <-healthCheckFailure:
-				// handling of a health check failure and executing some task cannot happen concurrently
-				for _, task := range mapTasks {
-					log.Printf("rescheduling map task %v\n", task.Id)
-					c.failedMapTask <- task
-				}
-				for _, task := range reduceTasks {
-					log.Printf("rescheduling reduce task %v\n", task.Partition)
-					c.failedReduceTask <- task
-				}
-				return
+				execReducef(task)
 			case <-c.shutdownWorkers:
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
